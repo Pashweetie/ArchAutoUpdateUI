@@ -8,8 +8,11 @@ Unattended `pacman -Syu` auto-updates for Arch Linux, done safely:
   for a new post since the last check. If there's unread news, it refuses to
   upgrade and raises a flag instead of blindly running `-Syu` past a
   manual-intervention announcement (keyring resets, package splits, etc.).
-- **KDE status app**: a Plasma-menu-launchable app (and login autostart popup)
-  showing last-update time and any pending-news warning.
+- **PyQt6 status app**: a real KDE-menu-launchable application (not just a popup)
+  with three tabs — current status, a live-streaming update log, and the parsed
+  Arch news feed. Launching normally shows status only; launching with `--auto`
+  (what the login autostart entry does) immediately runs the update if it's due,
+  with live output.
 
 ## Why
 
@@ -28,12 +31,13 @@ into Arch's own news feed before the upgrade runs.
 
 Installs:
 - `/usr/local/bin/arch-update.sh` — the update script (throttle + news guard + pacman -Syu)
-- `/usr/local/bin/arch-update-status-popup.sh` — zenity status popup
+- `/usr/local/share/arch-update-status/arch_update_app.py` — the PyQt6 status/update app
+- `/usr/share/polkit-1/actions/com.pashweetie.arch-update-status.policy` — polkit action for the "Run update now" button
 - `/etc/systemd/system/arch-update.{service,timer}` — boot + 7-day periodic trigger
-- `~/.config/autostart/arch-update-status.desktop` — shows status popup at login
-- `~/.local/share/applications/arch-update-status-launcher.desktop` — launchable from the KDE app menu as "Arch Update Status"
+- `~/.config/autostart/arch-update-status.desktop` — launches the app with `--auto` at login
+- `~/.local/share/applications/arch-update-status-launcher.desktop` — launchable from the KDE app menu as "Arch Update Status" (status view only, no `--auto`)
 
-Requires `zenity` for the popup (install with `sudo pacman -S zenity` if missing).
+Requires `python-pyqt6`: `sudo pacman -S python-pyqt6`
 
 **Before the first run**, check https://archlinux.org/news/ by hand once — the
 news guard only blocks starting from its *second* run, since the first run has
@@ -43,15 +47,18 @@ nothing to compare against yet.
 
 ```
 bin/
-  arch-update.sh                  # the actual update logic
-  arch-update-status-popup.sh     # zenity popup, reads the stamp/flag files
+  arch-update.sh                  # the actual update logic (throttle + news guard + pacman -Syu)
+app/
+  arch_update_app.py              # PyQt6 app: Status / Live Update / Arch News tabs
+polkit/
+  com.pashweetie.arch-update-status.policy  # lets "Run update now" prompt cleanly via pkexec
 systemd/
   arch-update.service             # oneshot, runs arch-update.sh
   arch-update.timer               # OnBootSec=5min, OnUnitActiveSec=7d
 autostart/
-  arch-update-status.desktop      # XDG autostart entry (login popup)
+  arch-update-status.desktop      # XDG autostart entry, launches app with --auto
 applications/
-  arch-update-status-launcher.desktop  # XDG app-menu entry (manual launch)
+  arch-update-status-launcher.desktop  # XDG app-menu entry, status view only
 install.sh
 ```
 

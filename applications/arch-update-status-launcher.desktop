@@ -2,7 +2,7 @@
 Type=Application
 Name=Arch Update Status
 Comment=Check Arch Linux auto-update status and pending news
-Exec=/usr/local/bin/arch-update-status-popup.sh
+Exec=/usr/bin/python3 /usr/local/share/arch-update-status/arch_update_app.py
 Icon=system-software-update
 Categories=System;Settings;
 Terminal=false
