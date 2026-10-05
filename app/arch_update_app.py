@@ -160,7 +160,8 @@ class StatusTab(QWidget):
             except OSError:
                 pending = "(unreadable)"
             self.news_flag_label.setText(
-                f"<span style='color:#e05d44'><b>⚠ Auto-update paused — unread Arch news:</b> {pending}</span>"
+                f"<span style='color:#e05d44'><b>⚠ Auto-update paused — unread Arch news:</b> {pending}. "
+                "Go to the <b>Arch News</b> tab to review and acknowledge it.</span>"
             )
         else:
             self.news_flag_label.setText("<span style='color:#5aa469'>✓ No pending news block.</span>")
@@ -189,19 +190,35 @@ class LiveUpdateTab(QWidget):
 
 
 class NewsTab(QWidget):
-    def __init__(self):
+    def __init__(self, status_tab=None):
         super().__init__()
+        self.status_tab = status_tab
         layout = QVBoxLayout(self)
+
+        self.pending_banner = QLabel()
+        self.pending_banner.setWordWrap(True)
+        self.pending_banner.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(self.pending_banner)
+
         self.list_widget = QListWidget()
         layout.addWidget(self.list_widget)
         self.error_label = QLabel()
         self.error_label.setWordWrap(True)
         layout.addWidget(self.error_label)
+
+        button_row = QHBoxLayout()
+        self.ack_button = QPushButton("Acknowledge latest news & allow update")
+        self.ack_button.clicked.connect(self.acknowledge_latest)
+        button_row.addWidget(self.ack_button)
+        layout.addLayout(button_row)
+
+        self._latest_entry = None
         self.load()
 
     def load(self):
         self.list_widget.clear()
         self.list_widget.addItem("Loading Arch news feed...")
+        self.refresh_banner()
 
         self.thread = QThread()
         self.fetcher = NewsFetcher()
@@ -211,12 +228,28 @@ class NewsTab(QWidget):
         self.fetcher.finished.connect(self.thread.quit)
         self.thread.start()
 
+    def refresh_banner(self):
+        if os.path.exists(NEWS_FLAG):
+            try:
+                with open(NEWS_FLAG) as f:
+                    pending = f.read().strip()
+            except OSError:
+                pending = "(unreadable)"
+            self.pending_banner.setText(
+                f"<span style='color:#e05d44'><b>⚠ Auto-update is paused on:</b> {pending}. "
+                "Read it below (double-click to open), then click Acknowledge to let the update proceed.</span>"
+            )
+            self.ack_button.setEnabled(True)
+        else:
+            self.pending_banner.setText("<span style='color:#5aa469'>✓ No update is currently blocked on news.</span>")
+
     def on_loaded(self, entries, error):
         self.list_widget.clear()
         if error:
             self.error_label.setText(f"Failed to fetch news feed: {error}")
             return
         self.error_label.setText("")
+        self._latest_entry = entries[0] if entries else None
         last_seen = read_epoch(NEWS_STAMP)
         for entry in entries:
             marker = ""
@@ -240,6 +273,40 @@ class NewsTab(QWidget):
 
             webbrowser.open(link)
 
+    def acknowledge_latest(self):
+        if not self._latest_entry:
+            return
+        try:
+            from email.utils import parsedate_to_datetime
+
+            pub_dt = parsedate_to_datetime(self._latest_entry["pubDate"])
+            epoch = int(pub_dt.timestamp()) if pub_dt else int(time.time())
+        except Exception:  # noqa: BLE001
+            epoch = int(time.time())
+
+        # NEWS_STAMP and NEWS_FLAG are root-owned (written by arch-update.sh as
+        # root too) - acknowledging from the GUI needs the same privilege.
+        script = f"echo {epoch} > {NEWS_STAMP} && rm -f {NEWS_FLAG}"
+        try:
+            result = subprocess.run(
+                ["pkexec", "bash", "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except Exception as e:  # noqa: BLE001
+            self.error_label.setText(f"Failed to acknowledge: {e}")
+            return
+
+        if result.returncode != 0:
+            self.error_label.setText(f"Acknowledge failed: {result.stderr.strip() or 'unknown error'}")
+            return
+
+        self.error_label.setText("")
+        self.refresh_banner()
+        if self.status_tab:
+            self.status_tab.refresh()
+
 
 class MainWindow(QMainWindow):
     def __init__(self, auto=False):
@@ -250,7 +317,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.status_tab = StatusTab(self.run_update)
         self.live_tab = LiveUpdateTab()
-        self.news_tab = NewsTab()
+        self.news_tab = NewsTab(status_tab=self.status_tab)
         self.tabs.addTab(self.status_tab, "Status")
         self.tabs.addTab(self.live_tab, "Live Update")
         self.tabs.addTab(self.news_tab, "Arch News")
@@ -261,7 +328,9 @@ class MainWindow(QMainWindow):
         if auto:
             last_epoch = read_epoch(STAMP)
             overdue = last_epoch == 0 or (int(time.time()) - last_epoch) >= MIN_INTERVAL_SECS
-            if overdue and not os.path.exists(NEWS_FLAG):
+            if overdue and os.path.exists(NEWS_FLAG):
+                self.tabs.setCurrentWidget(self.news_tab)
+            elif overdue:
                 QTimer.singleShot(200, self.run_update)
 
     def run_update(self):

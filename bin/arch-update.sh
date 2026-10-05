@@ -53,15 +53,13 @@ MIN_INTERVAL_SECS=$((7 * 24 * 60 * 60))  # 7 days: Arch wiki recommends not goin
         latest_epoch=$(date -d "$latest_date" +%s 2>/dev/null || echo 0)
         last_seen_epoch=0
         [ -f "$NEWS_STAMP" ] && last_seen_epoch=$(cat "$NEWS_STAMP" 2>/dev/null || echo 0)
-        if [ "$latest_epoch" -gt "$last_seen_epoch" ] && [ "$last_seen_epoch" -ne 0 ]; then
-          echo "New Arch news since last check: \"${latest_title:-<untitled>}\" ($latest_date)"
-          echo "Refusing to auto-upgrade - review https://archlinux.org/news/ first."
+        if [ "$latest_epoch" -gt "$last_seen_epoch" ]; then
+          echo "New Arch news since last acknowledgement: \"${latest_title:-<untitled>}\" ($latest_date)"
+          echo "Refusing to auto-upgrade - acknowledge it in the Arch Update Status app, or review https://archlinux.org/news/ and acknowledge there."
           echo "$latest_title ($latest_date)" > "$NEWS_FLAG"
           command -v notify-send >/dev/null 2>&1 && notify-send -u critical "Arch auto-update paused" "New Arch news: ${latest_title:-check archlinux.org/news}" || true
           exit 0
         fi
-        # No new entry (or this is the first run ever) - record it as seen and proceed.
-        echo "$latest_epoch" > "$NEWS_STAMP"
       fi
     fi
   fi
