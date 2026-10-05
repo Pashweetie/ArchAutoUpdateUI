@@ -40,6 +40,12 @@ LOG_PATH = "/var/log/arch-update.log"
 UPDATE_SCRIPT = "/usr/local/bin/arch-update.sh"
 NEWS_FEED = "https://archlinux.org/feeds/news/"
 MIN_INTERVAL_SECS = 7 * 24 * 60 * 60
+PACMAN_PID_FILE = "/run/arch-update-pacman.pid"
+# Once this phrase appears in pacman's live output, packages are actively
+# being written to disk - aborting past this point is how a system gets
+# bricked (half-installed packages, corrupted files). The Abort button is
+# disabled from this point onward until the run ends.
+UNSAFE_PHASE_MARKER = "Processing package changes"
 
 
 def read_epoch(path):
@@ -109,6 +115,8 @@ def parse_last_run():
         outcome = "success"
     elif detail.startswith("FAILED"):
         outcome = "failed"
+    elif detail.startswith("ABORTED"):
+        outcome = "aborted"
     elif detail.startswith("INTERRUPTED"):
         outcome = "interrupted"
     elif "throttle" in detail:
@@ -172,6 +180,11 @@ class NewsFetcher(QObject):
 class UpdateRunner(QThread):
     line_ready = pyqtSignal(str)
     finished_run = pyqtSignal(int)
+    unsafe_phase_entered = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self._unsafe_signaled = False
 
     def run(self):
         try:
@@ -189,8 +202,39 @@ class UpdateRunner(QThread):
 
         for line in proc.stdout:
             self.line_ready.emit(line.rstrip("\n"))
+            if not self._unsafe_signaled and UNSAFE_PHASE_MARKER in line:
+                self._unsafe_signaled = True
+                self.unsafe_phase_entered.emit()
         proc.wait()
         self.finished_run.emit(proc.returncode)
+
+    def abort(self):
+        """
+        Send SIGINT to the actual pacman process (read from the PID file
+        arch-update.sh writes), not to pkexec or this thread. Only ever
+        call this while still in the safe phase (caller's responsibility -
+        the UI disables the Abort button once unsafe_phase_entered fires).
+        Uses pkexec since the PID file and the pacman process are root-owned.
+        """
+        try:
+            with open(PACMAN_PID_FILE) as f:
+                pid = f.read().strip()
+        except (FileNotFoundError, ValueError):
+            return False, "No active pacman process found (nothing to abort)."
+
+        try:
+            result = subprocess.run(
+                ["pkexec", "kill", "-SIGINT", pid],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as e:  # noqa: BLE001
+            return False, f"Failed to send abort signal: {e}"
+
+        if result.returncode != 0:
+            return False, result.stderr.strip() or "Abort signal failed (process may have already exited)."
+        return True, None
 
 
 class StatusTab(QWidget):
@@ -242,7 +286,7 @@ class StatusTab(QWidget):
         self.log_view.setVisible(checked)
         self.log_toggle.setText("Hide raw log ▴" if checked else "Show raw log ▾")
         if checked:
-            self.log_view.setPlainText("\n".join(tail_log()))
+            self.log_view.setPlainText("\n".join(tail_log(n=1500)))
 
     def refresh(self):
         last_epoch = read_epoch(STAMP)
@@ -276,6 +320,7 @@ class StatusTab(QWidget):
             colors = {
                 "success": "#5aa469",
                 "failed": "#e05d44",
+                "aborted": "#e0a544",
                 "interrupted": "#e0a544",
                 "skipped-throttle": "#888888",
                 "skipped-news": "#e0a544",
@@ -286,6 +331,7 @@ class StatusTab(QWidget):
             labels = {
                 "success": "✓ Succeeded",
                 "failed": "✗ Failed",
+                "aborted": "⏹ Aborted by you (before any packages were written)",
                 "interrupted": "⚠ Interrupted (didn't finish cleanly)",
                 "skipped-throttle": "– Skipped (too soon since last update)",
                 "skipped-news": "⚠ Skipped (unacknowledged Arch news)",
@@ -315,11 +361,11 @@ class StatusTab(QWidget):
                 self.last_run_details.setVisible(False)
 
         if self.log_view.isVisible():
-            self.log_view.setPlainText("\n".join(tail_log()))
+            self.log_view.setPlainText("\n".join(tail_log(n=1500)))
 
 
 class LiveUpdateTab(QWidget):
-    def __init__(self):
+    def __init__(self, run_cb, abort_cb):
         super().__init__()
         layout = QVBoxLayout(self)
         self.output = QTextEdit()
@@ -329,6 +375,17 @@ class LiveUpdateTab(QWidget):
         self.status_label = QLabel("Idle.")
         layout.addWidget(self.status_label)
 
+        button_row = QHBoxLayout()
+        self.run_button = QPushButton("Run update now")
+        self.run_button.clicked.connect(run_cb)
+        button_row.addWidget(self.run_button)
+
+        self.abort_button = QPushButton("Abort")
+        self.abort_button.setEnabled(False)
+        self.abort_button.clicked.connect(abort_cb)
+        button_row.addWidget(self.abort_button)
+        layout.addLayout(button_row)
+
     def append_line(self, line):
         self.output.moveCursor(QTextCursor.MoveOperation.End)
         self.output.insertPlainText(line + "\n")
@@ -336,6 +393,13 @@ class LiveUpdateTab(QWidget):
 
     def set_status(self, text):
         self.status_label.setText(text)
+
+    def set_abort_enabled(self, enabled, reason=""):
+        self.abort_button.setEnabled(enabled)
+        self.abort_button.setText("Abort" if enabled else f"Abort (unavailable{': ' + reason if reason else ''})")
+
+    def set_run_enabled(self, enabled):
+        self.run_button.setEnabled(enabled)
 
 
 class NewsTab(QWidget):
@@ -466,7 +530,7 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.status_tab = StatusTab(self.run_update)
-        self.live_tab = LiveUpdateTab()
+        self.live_tab = LiveUpdateTab(self.run_update, self.abort_update)
         self.news_tab = NewsTab(status_tab=self.status_tab)
         self.tabs.addTab(self.status_tab, "Status")
         self.tabs.addTab(self.live_tab, "Live Update")
@@ -490,14 +554,34 @@ class MainWindow(QMainWindow):
         self.live_tab.output.clear()
         self.live_tab.set_status("Running (you may see a polkit password prompt)...")
         self.status_tab.run_button.setEnabled(False)
+        self.live_tab.set_run_enabled(False)
+        # Abort starts enabled - it's only safe before pacman reaches the
+        # package-write phase, which hasn't happened yet at the very start.
+        self.live_tab.set_abort_enabled(True)
 
         self.runner = UpdateRunner()
         self.runner.line_ready.connect(self.live_tab.append_line)
         self.runner.finished_run.connect(self.on_update_finished)
+        self.runner.unsafe_phase_entered.connect(self.on_unsafe_phase_entered)
         self.runner.start()
+
+    def on_unsafe_phase_entered(self):
+        self.live_tab.set_abort_enabled(False, reason="packages are being written to disk")
+
+    def abort_update(self):
+        if not self.runner or not self.runner.isRunning():
+            return
+        self.live_tab.set_status("Sending abort signal...")
+        ok, error = self.runner.abort()
+        if ok:
+            self.live_tab.set_status("Abort signal sent - waiting for pacman to stop...")
+        else:
+            self.live_tab.set_status(f"Abort failed: {error}")
 
     def on_update_finished(self, code):
         self.live_tab.set_status(f"Finished (exit code {code}).")
+        self.live_tab.set_abort_enabled(False)
+        self.live_tab.set_run_enabled(True)
         self.status_tab.run_button.setEnabled(True)
         self.status_tab.refresh()
 

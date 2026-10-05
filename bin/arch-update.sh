@@ -15,6 +15,13 @@ MIN_INTERVAL_SECS=$((7 * 24 * 60 * 60))  # 7 days: Arch wiki recommends not goin
 run_finished=0
 on_exit() {
   local exit_code=$?
+  rm -f /run/arch-update-pacman.pid
+  # Backstop: if pacman's own lock survived an abort/interrupt somehow,
+  # verify no pacman process is actually alive before clearing it - never
+  # remove a lock a live process still holds.
+  if [ -f /var/lib/pacman/db.lck ] && ! pgrep -x pacman >/dev/null 2>&1; then
+    rm -f /var/lib/pacman/db.lck
+  fi
   if [ "$run_finished" -eq 0 ]; then
     {
       echo "RESULT: INTERRUPTED - run did not complete normally (exit code $exit_code). Check for a stale lock: /run/arch-update.lock, and a stale pacman db lock: /var/lib/pacman/db.lck"
@@ -96,12 +103,26 @@ trap on_exit EXIT
   # The raw output is logged and streamed verbatim (unmodified) - the
   # PACKAGES:/ERRORS:/RESULT: summary below is appended as an addition for the
   # app to parse, never a replacement for the real log content.
-  set +e
-  stdbuf -oL -eL pacman -Syu --noconfirm 2>&1 | tee "/tmp/arch-update-raw.$$"
-  pacman_status=${PIPESTATUS[0]}
-  set -e
-
+  #
+  # pacman runs in the background via a named pipe so we can capture its real
+  # PID (not pkexec's, not tee's) into PACMAN_PID_FILE - the app's Abort
+  # button needs this to send SIGINT to the right process.
+  PACMAN_PID_FILE="/run/arch-update-pacman.pid"
   raw_output="/tmp/arch-update-raw.$$"
+  set +e
+  stdbuf -oL -eL pacman -Syu --noconfirm > "$raw_output" 2>&1 &
+  pacman_pid=$!
+  echo "$pacman_pid" > "$PACMAN_PID_FILE"
+  # Mirror the output file to the log/live-stream as it grows, until pacman exits.
+  tail -n +1 -f "$raw_output" --pid="$pacman_pid" &
+  tail_pid=$!
+  wait "$pacman_pid"
+  pacman_status=$?
+  # Give the tail a brief moment to flush the last lines, then stop it.
+  sleep 0.2
+  kill "$tail_pid" 2>/dev/null || true
+  rm -f "$PACMAN_PID_FILE"
+  set -e
   pkg_count=$(grep -oE '^Packages \([0-9]+\)' "$raw_output" | grep -oE '[0-9]+' | head -1)
 
   # Extract the actual package names (strip version/epoch suffixes) into a
@@ -126,6 +147,13 @@ trap on_exit EXIT
     date +%s > "$STAMP"
     run_end_epoch=$(date +%s)
     echo "RESULT: success - ${pkg_count:-0} packages upgraded in $((run_end_epoch - run_start_epoch))s"
+  elif [ "$pacman_status" -eq 130 ]; then
+    # 130 = 128 + SIGINT (2): the app's Abort button sent SIGINT to pacman.
+    # This path is only reachable during a safe phase - the app refuses to
+    # send the signal once "Processing package changes" has been seen in
+    # the live output, so pacman should still be in resolve/download/check,
+    # before anything was written to disk.
+    echo "RESULT: ABORTED - stopped by user before any packages were written to disk"
   else
     echo "RESULT: FAILED - pacman exited with status $pacman_status (see ERRORS above)"
   fi
