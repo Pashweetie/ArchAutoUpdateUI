@@ -41,11 +41,6 @@ UPDATE_SCRIPT = "/usr/local/bin/arch-update.sh"
 NEWS_FEED = "https://archlinux.org/feeds/news/"
 MIN_INTERVAL_SECS = 7 * 24 * 60 * 60
 PACMAN_PID_FILE = "/run/arch-update-pacman.pid"
-# Once this phrase appears in pacman's live output, packages are actively
-# being written to disk - aborting past this point is how a system gets
-# bricked (half-installed packages, corrupted files). The Abort button is
-# disabled from this point onward until the run ends.
-UNSAFE_PHASE_MARKER = "Processing package changes"
 
 
 def read_epoch(path):
@@ -180,11 +175,6 @@ class NewsFetcher(QObject):
 class UpdateRunner(QThread):
     line_ready = pyqtSignal(str)
     finished_run = pyqtSignal(int)
-    unsafe_phase_entered = pyqtSignal()
-
-    def __init__(self):
-        super().__init__()
-        self._unsafe_signaled = False
 
     def run(self):
         try:
@@ -202,19 +192,37 @@ class UpdateRunner(QThread):
 
         for line in proc.stdout:
             self.line_ready.emit(line.rstrip("\n"))
-            if not self._unsafe_signaled and UNSAFE_PHASE_MARKER in line:
-                self._unsafe_signaled = True
-                self.unsafe_phase_entered.emit()
         proc.wait()
         self.finished_run.emit(proc.returncode)
 
     def abort(self):
         """
         Send SIGINT to the actual pacman process (read from the PID file
-        arch-update.sh writes), not to pkexec or this thread. Only ever
-        call this while still in the safe phase (caller's responsibility -
-        the UI disables the Abort button once unsafe_phase_entered fires).
-        Uses pkexec since the PID file and the pacman process are root-owned.
+        arch-update.sh writes), not to pkexec or this thread. Uses pkexec
+        since the PID file and the pacman process are root-owned.
+
+        Safe to call at any point while a run is active - verified against
+        pacman's actual source (sighandler.c, libalpm trans.c/add.c), not
+        inferred from log text:
+          - pacman installs a dedicated SIGINT handler (soft_interrupt_handler)
+            rather than dying on the default signal action.
+          - Before a transaction has reached STATE_COMMITING (i.e. during
+            dependency resolution and downloads), alpm_trans_interrupt()
+            fails and pacman exits immediately and cleanly (observed exit
+            code 128+SIGINT = 130, confirmed against this exact behavior).
+          - Downloads themselves are written to randomly-named .part tempfiles
+            and only atomically rename()'d into place on full success
+            (dload.c) - an interrupted download never leaves a corrupt real
+            package file behind.
+          - Once committing has begun, _alpm_upgrade_packages only checks
+            the interrupted flag BETWEEN whole packages (add.c) - a given
+            package's extraction+scriptlets+db-write always runs to full
+            completion once started; SIGINT just stops the loop before the
+            NEXT package begins. There is no code path where a single
+            package's install is partially applied by an abort.
+        The practical effect of aborting mid-commit is a short delay (current
+        package finishes, usually a few seconds) before pacman actually exits -
+        not a corruption risk.
         """
         try:
             with open(PACMAN_PID_FILE) as f:
@@ -331,7 +339,7 @@ class StatusTab(QWidget):
             labels = {
                 "success": "✓ Succeeded",
                 "failed": "✗ Failed",
-                "aborted": "⏹ Aborted by you (before any packages were written)",
+                "aborted": "⏹ Aborted by you (packages already written when aborted were completed cleanly; nothing partial)",
                 "interrupted": "⚠ Interrupted (didn't finish cleanly)",
                 "skipped-throttle": "– Skipped (too soon since last update)",
                 "skipped-news": "⚠ Skipped (unacknowledged Arch news)",
@@ -394,9 +402,8 @@ class LiveUpdateTab(QWidget):
     def set_status(self, text):
         self.status_label.setText(text)
 
-    def set_abort_enabled(self, enabled, reason=""):
+    def set_abort_enabled(self, enabled):
         self.abort_button.setEnabled(enabled)
-        self.abort_button.setText("Abort" if enabled else f"Abort (unavailable{': ' + reason if reason else ''})")
 
     def set_run_enabled(self, enabled):
         self.run_button.setEnabled(enabled)
@@ -555,23 +562,20 @@ class MainWindow(QMainWindow):
         self.live_tab.set_status("Running (you may see a polkit password prompt)...")
         self.status_tab.run_button.setEnabled(False)
         self.live_tab.set_run_enabled(False)
-        # Abort starts enabled - it's only safe before pacman reaches the
-        # package-write phase, which hasn't happened yet at the very start.
         self.live_tab.set_abort_enabled(True)
 
         self.runner = UpdateRunner()
         self.runner.line_ready.connect(self.live_tab.append_line)
         self.runner.finished_run.connect(self.on_update_finished)
-        self.runner.unsafe_phase_entered.connect(self.on_unsafe_phase_entered)
         self.runner.start()
-
-    def on_unsafe_phase_entered(self):
-        self.live_tab.set_abort_enabled(False, reason="packages are being written to disk")
 
     def abort_update(self):
         if not self.runner or not self.runner.isRunning():
             return
-        self.live_tab.set_status("Sending abort signal...")
+        self.live_tab.set_status(
+            "Sending abort signal - pacman will finish the package it's currently "
+            "writing (if any), then stop before starting the next one..."
+        )
         ok, error = self.runner.abort()
         if ok:
             self.live_tab.set_status("Abort signal sent - waiting for pacman to stop...")

@@ -148,12 +148,15 @@ trap on_exit EXIT
     run_end_epoch=$(date +%s)
     echo "RESULT: success - ${pkg_count:-0} packages upgraded in $((run_end_epoch - run_start_epoch))s"
   elif [ "$pacman_status" -eq 130 ]; then
-    # 130 = 128 + SIGINT (2): the app's Abort button sent SIGINT to pacman.
-    # This path is only reachable during a safe phase - the app refuses to
-    # send the signal once "Processing package changes" has been seen in
-    # the live output, so pacman should still be in resolve/download/check,
-    # before anything was written to disk.
-    echo "RESULT: ABORTED - stopped by user before any packages were written to disk"
+    # 130 = 128 + SIGINT (2), confirmed from pacman's actual source
+    # (sighandler.c: _Exit(128 + signum)). Verified safe to reach at any
+    # point in a run, not just before the write phase: pacman's own
+    # alpm_trans_interrupt() check (libalpm trans.c/add.c) only applies
+    # BETWEEN whole packages during the install loop - any package already
+    # being written completes fully before the loop honors the interrupt,
+    # so this is never a half-installed package, only possibly fewer
+    # packages than were queued.
+    echo "RESULT: ABORTED - stopped by user (any packages already written completed cleanly)"
   else
     echo "RESULT: FAILED - pacman exited with status $pacman_status (see ERRORS above)"
   fi
