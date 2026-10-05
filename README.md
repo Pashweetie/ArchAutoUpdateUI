@@ -42,6 +42,13 @@ remember to check.
 ./install.sh
 ```
 
+`install.sh` checks for and installs any missing dependencies itself
+(`curl`, `polkit`, `python-pyqt6` via `pacman`) before installing anything —
+no manual pre-steps, no guessing what your system is missing. It also
+verifies `systemctl --user` works and that systemd is actually PID 1 before
+proceeding, and fails with a clear message rather than installing a timer
+that can't ever fire if those aren't true.
+
 Installs:
 - `/usr/local/bin/arch-update.sh` — the update script (throttle + news guard + pacman -Syu)
 - `/usr/local/share/arch-update-status/arch_update_app.py` — the PyQt6 status/update app
@@ -50,10 +57,15 @@ Installs:
 - `~/.config/systemd/user/arch-update-status.{service,timer}` — user timer, launches the app with `--auto`, login + 7-day
 - `~/.local/share/applications/arch-update-status-launcher.desktop` — KDE app-menu entry, manual review only
 
-Requires `python-pyqt6`: `sudo pacman -S python-pyqt6`
-
 No manual pre-check of archlinux.org/news is needed — the news gate blocks on
 its own from the very first run, and you clear it from inside the app.
+
+One thing the script deliberately does **not** install: `yay`. The original
+setup this project replaces chained an AUR update step
+(`arch-update-yay.service`) after every pacman run. If you use yay, it needs
+its own one-time bootstrap from the AUR (it can't be installed via `pacman`),
+so `install.sh` just warns if it's missing rather than guessing how you want
+it set up.
 
 ## Files
 
