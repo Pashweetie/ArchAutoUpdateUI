@@ -1,0 +1,6 @@
+[Unit]
+Description=Arch Update Status app (auto-check mode)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/share/arch-update-status/arch_update_app.py --auto

@@ -14,35 +14,48 @@ sudo mkdir -p /usr/local/share/arch-update-status
 sudo install -m 755 -o root -g root "$HERE/app/arch_update_app.py" /usr/local/share/arch-update-status/arch_update_app.py
 sudo install -m 644 -o root -g root "$HERE/polkit/com.pashweetie.arch-update-status.policy" /usr/share/polkit-1/actions/com.pashweetie.arch-update-status.policy
 
-echo "Installing user files (no sudo)..."
-mkdir -p ~/.config/autostart ~/.local/share/applications
-install -m 644 "$HERE/autostart/arch-update-status.desktop" ~/.config/autostart/arch-update-status.desktop
+echo "Installing the KDE app-menu launcher (manual review, no sudo)..."
+mkdir -p ~/.local/share/applications
 install -m 644 "$HERE/applications/arch-update-status-launcher.desktop" ~/.local/share/applications/arch-update-status-launcher.desktop
 
-echo "Reloading systemd and enabling timer..."
+echo "Installing the user-level systemd timer that launches the app with --auto (no sudo)..."
+mkdir -p ~/.config/systemd/user
+install -m 644 "$HERE/systemd-user/arch-update-status.service" ~/.config/systemd/user/arch-update-status.service
+install -m 644 "$HERE/systemd-user/arch-update-status.timer" ~/.config/systemd/user/arch-update-status.timer
+
+echo "Reloading system systemd and enabling the headless update timer..."
 sudo systemctl daemon-reload
 sudo systemctl enable --now arch-update.timer
+
+echo "Reloading user systemd and enabling the app-launch timer..."
+systemctl --user daemon-reload
+systemctl --user enable --now arch-update-status.timer
 
 cat <<'EOF'
 
 Requires python-pyqt6 - install it first if missing:
   sudo pacman -S python-pyqt6
 
-Done. Before the first run, manually check https://archlinux.org/news/ once -
-the news-check only blocks starting from its SECOND run (the first run just
-records the current latest post as "seen").
+Done. There are now two independent systemd timers:
+  - arch-update.timer (system, root)       -> runs arch-update.sh headless at boot + every 7 days
+  - arch-update-status.timer (user, you)   -> launches the GUI app with --auto at login + every 7 days
+
+Both apply the same 7-day throttle (shared stamp file), so whichever fires
+first in a given week does the actual pacman run; the other is a no-op that
+quarter.
+
+The news gate is fully manual now: arch-update.sh pauses on ANY Arch news
+post newer than your last acknowledgement (including the very first run -
+there's no time-based guessing). Open the app's "Arch News" tab, read the
+pending entry, and click "Acknowledge latest news & allow update" to let
+the next run proceed.
 
 If you had an old update-on-shutdown.service/.sh from a previous setup, remove it:
   sudo systemctl disable --now update-on-shutdown.service
   sudo rm -f /etc/systemd/system/update-on-shutdown.service /usr/local/bin/update-on-shutdown.sh
   sudo systemctl daemon-reload
 
-Launch the status app anytime from the KDE app menu ("Arch Update Status"),
-or run directly: python3 /usr/local/share/arch-update-status/arch_update_app.py
-
-At login, the autostart entry runs with --auto: it opens the status window and,
-if an update is overdue (and no Arch news is blocking it), immediately starts
-the update with live output in the "Live Update" tab. Clicking "Run update now"
-on the Status tab triggers the same thing on demand (via pkexec, so you'll see
-a polkit password prompt).
+Launch the status app anytime from the KDE app menu ("Arch Update Status")
+for manual review (no auto-update), or run directly:
+  python3 /usr/local/share/arch-update-status/arch_update_app.py
 EOF

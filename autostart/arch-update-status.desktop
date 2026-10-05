@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Arch Update Status
-Comment=Shows the auto-update status and any pending Arch news at login
-Exec=/usr/bin/python3 /usr/local/share/arch-update-status/arch_update_app.py --auto
-NoDisplay=false
-Terminal=false
