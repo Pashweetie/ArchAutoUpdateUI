@@ -82,7 +82,7 @@ def parse_last_run():
     outcome is one of: success, failed, interrupted, skipped-throttle,
     skipped-news, skipped-lock, skipped-offline, unknown.
     """
-    lines = tail_log(n=500)
+    lines = tail_log(n=1500)
     if not lines:
         return None
 
@@ -96,10 +96,12 @@ def parse_last_run():
         return None
 
     result_line = lines[last_result_idx]
+    run_start_idx = None
     when = None
     for i in range(last_result_idx, -1, -1):
         if lines[i].startswith("  Run started:"):
             when = lines[i].split("Run started:", 1)[1].strip()
+            run_start_idx = i
             break
 
     detail = result_line.split("RESULT:", 1)[1].strip()
@@ -120,7 +122,31 @@ def parse_last_run():
     else:
         outcome = "unknown"
 
-    return {"when": when, "outcome": outcome, "detail": detail}
+    # Collect the PACKAGES: and ERRORS: blocks between the run header and the
+    # RESULT line, if present - these are indented "  name" lines following
+    # their own header line.
+    packages, errors = [], []
+    current_block = None
+    scan_from = run_start_idx if run_start_idx is not None else 0
+    for line in lines[scan_from:last_result_idx]:
+        if line == "PACKAGES:":
+            current_block = packages
+            continue
+        if line == "ERRORS:":
+            current_block = errors
+            continue
+        if line.startswith("  ") and current_block is not None:
+            current_block.append(line.strip())
+        else:
+            current_block = None
+
+    return {
+        "when": when,
+        "outcome": outcome,
+        "detail": detail,
+        "packages": packages,
+        "errors": errors,
+    }
 
 
 class NewsFetcher(QObject):
@@ -183,6 +209,16 @@ class StatusTab(QWidget):
             lbl.setTextFormat(Qt.TextFormat.RichText)
             layout.addWidget(lbl)
 
+        # Always-visible details for the last run: packages updated on
+        # success, actual error text on failure. This is parsed/structured
+        # output, not the raw log - it stays visible even when the raw log
+        # below is collapsed.
+        self.last_run_details = QTextEdit()
+        self.last_run_details.setReadOnly(True)
+        self.last_run_details.setMaximumHeight(120)
+        self.last_run_details.setVisible(False)
+        layout.addWidget(self.last_run_details)
+
         self.run_button = QPushButton("Run update now")
         self.run_button.clicked.connect(run_update_cb)
         layout.addWidget(self.run_button)
@@ -235,6 +271,7 @@ class StatusTab(QWidget):
         run = parse_last_run()
         if run is None:
             self.last_run_label.setText("<b>Last run:</b> no completed run found yet.")
+            self.last_run_details.setVisible(False)
         else:
             colors = {
                 "success": "#5aa469",
@@ -263,6 +300,19 @@ class StatusTab(QWidget):
                 f"<b>Last run</b> ({when}): <span style='color:{color}'><b>{label}</b></span><br>"
                 f"<span style='color:#888888'>{run['detail']}</span>"
             )
+
+            if run["errors"]:
+                self.last_run_details.setPlainText(
+                    "Error details:\n" + "\n".join(run["errors"])
+                )
+                self.last_run_details.setVisible(True)
+            elif run["packages"]:
+                self.last_run_details.setPlainText(
+                    f"Packages updated ({len(run['packages'])}):\n" + ", ".join(run["packages"])
+                )
+                self.last_run_details.setVisible(True)
+            else:
+                self.last_run_details.setVisible(False)
 
         if self.log_view.isVisible():
             self.log_view.setPlainText("\n".join(tail_log()))

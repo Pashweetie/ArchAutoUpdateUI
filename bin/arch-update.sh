@@ -94,20 +94,38 @@ trap on_exit EXIT
   # still truncating the one line that's genuinely unreadable (the full
   # package-name dump) as it passes through.
   set +e
-  pacman -Syu --noconfirm 2>&1 | tee /tmp/arch-update-pkgcount.$$ | \
-    sed -E 's/^(Packages \([0-9]+\)) .*/\1 - full package names omitted from the log for readability (still shown live during the run)/'
+  pacman -Syu --noconfirm 2>&1 | tee "/tmp/arch-update-raw.$$" | \
+    sed -E 's/^(Packages \([0-9]+\)) .*/\1 - full package names omitted from the log for readability (still shown live during the run; parsed list is in PACKAGES: below)/'
   pacman_status=${PIPESTATUS[0]}
   set -e
 
-  pkg_count=$(grep -oE '^Packages \([0-9]+\)' "/tmp/arch-update-pkgcount.$$" | grep -oE '[0-9]+' | head -1)
-  rm -f "/tmp/arch-update-pkgcount.$$"
+  raw_output="/tmp/arch-update-raw.$$"
+  pkg_count=$(grep -oE '^Packages \([0-9]+\)' "$raw_output" | grep -oE '[0-9]+' | head -1)
+
+  # Extract the actual package names (strip version/epoch suffixes) into a
+  # machine-parseable block the app can read without re-deriving it from the
+  # raw pacman text.
+  pkg_line=$(grep -E '^Packages \([0-9]+\)' "$raw_output" | sed -E 's/^Packages \([0-9]+\) //')
+  if [ -n "$pkg_line" ]; then
+    echo "PACKAGES:"
+    echo "$pkg_line" | tr -s ' ' '\n' | sed -E 's/-[0-9][^-]*(:[0-9][^-]*)?-[0-9]+$//' | sort -u | sed 's/^/  /'
+  fi
+
+  # Surface pacman's real error lines verbatim (not just the exit code) so a
+  # failure is diagnosable from the parsed status alone.
+  error_lines=$(grep -E '^error:' "$raw_output" || true)
+  if [ -n "$error_lines" ]; then
+    echo "ERRORS:"
+    echo "$error_lines" | sed 's/^/  /'
+  fi
+  rm -f "$raw_output"
 
   if [ "$pacman_status" -eq 0 ]; then
     date +%s > "$STAMP"
     run_end_epoch=$(date +%s)
     echo "RESULT: success - ${pkg_count:-0} packages upgraded in $((run_end_epoch - run_start_epoch))s"
   else
-    echo "RESULT: FAILED - pacman exited with status $pacman_status (see output above)"
+    echo "RESULT: FAILED - pacman exited with status $pacman_status (see ERRORS above)"
   fi
   echo "────────────────────────────────────────────────────────────"
   run_finished=1
