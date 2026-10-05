@@ -132,13 +132,11 @@ class StatusTab(QWidget):
         layout.addWidget(QLabel("<b>Recent log:</b>"))
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setMaximumHeight(200)
-        layout.addWidget(self.log_view)
+        layout.addWidget(self.log_view, stretch=1)
 
         self.run_button = QPushButton("Run update now")
         self.run_button.clicked.connect(run_update_cb)
         layout.addWidget(self.run_button)
-        layout.addStretch()
 
         self.refresh()
 
@@ -176,7 +174,7 @@ class LiveUpdateTab(QWidget):
         self.output = QTextEdit()
         self.output.setReadOnly(True)
         self.output.setFontFamily("monospace")
-        layout.addWidget(self.output)
+        layout.addWidget(self.output, stretch=1)
         self.status_label = QLabel("Idle.")
         layout.addWidget(self.status_label)
 
@@ -201,7 +199,7 @@ class NewsTab(QWidget):
         layout.addWidget(self.pending_banner)
 
         self.list_widget = QListWidget()
-        layout.addWidget(self.list_widget)
+        layout.addWidget(self.list_widget, stretch=1)
         self.error_label = QLabel()
         self.error_label.setWordWrap(True)
         layout.addWidget(self.error_label)
@@ -313,6 +311,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Arch Update Status")
         self.resize(560, 480)
+        self.setMinimumSize(420, 320)
 
         self.tabs = QTabWidget()
         self.status_tab = StatusTab(self.run_update)
