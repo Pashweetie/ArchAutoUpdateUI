@@ -71,6 +71,58 @@ def tail_log(n=15):
         return []
 
 
+def parse_last_run():
+    """
+    Parse the structured RESULT line from the most recent run block in the
+    log, so the Status tab can show a real status instead of raw pacman
+    output. Returns a dict: {when, outcome, detail} or None if no run has
+    ever completed (e.g. log doesn't exist, or the only runs so far never
+    reached a RESULT line - a currently-in-progress or crashed run).
+
+    outcome is one of: success, failed, interrupted, skipped-throttle,
+    skipped-news, skipped-lock, skipped-offline, unknown.
+    """
+    lines = tail_log(n=500)
+    if not lines:
+        return None
+
+    # Walk backwards to find the most recent run's header + RESULT line.
+    last_result_idx = None
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith("RESULT:"):
+            last_result_idx = i
+            break
+    if last_result_idx is None:
+        return None
+
+    result_line = lines[last_result_idx]
+    when = None
+    for i in range(last_result_idx, -1, -1):
+        if lines[i].startswith("  Run started:"):
+            when = lines[i].split("Run started:", 1)[1].strip()
+            break
+
+    detail = result_line.split("RESULT:", 1)[1].strip()
+    if detail.startswith("success"):
+        outcome = "success"
+    elif detail.startswith("FAILED"):
+        outcome = "failed"
+    elif detail.startswith("INTERRUPTED"):
+        outcome = "interrupted"
+    elif "throttle" in detail:
+        outcome = "skipped-throttle"
+    elif "news" in detail:
+        outcome = "skipped-news"
+    elif "already running" in detail:
+        outcome = "skipped-lock"
+    elif "offline" in detail or "network" in detail:
+        outcome = "skipped-offline"
+    else:
+        outcome = "unknown"
+
+    return {"when": when, "outcome": outcome, "detail": detail}
+
+
 class NewsFetcher(QObject):
     finished = pyqtSignal(list, str)  # entries, error
 
@@ -123,22 +175,38 @@ class StatusTab(QWidget):
         self.last_update_label = QLabel()
         self.next_due_label = QLabel()
         self.news_flag_label = QLabel()
+        self.last_run_label = QLabel()
         self.news_flag_label.setWordWrap(True)
+        self.last_run_label.setWordWrap(True)
 
-        for lbl in (self.last_update_label, self.next_due_label, self.news_flag_label):
+        for lbl in (self.last_update_label, self.next_due_label, self.news_flag_label, self.last_run_label):
             lbl.setTextFormat(Qt.TextFormat.RichText)
             layout.addWidget(lbl)
-
-        layout.addWidget(QLabel("<b>Recent log:</b>"))
-        self.log_view = QTextEdit()
-        self.log_view.setReadOnly(True)
-        layout.addWidget(self.log_view, stretch=1)
 
         self.run_button = QPushButton("Run update now")
         self.run_button.clicked.connect(run_update_cb)
         layout.addWidget(self.run_button)
 
+        # Raw log is debugging-only: collapsed by default, opt-in via toggle.
+        self.log_toggle = QPushButton("Show raw log ▾")
+        self.log_toggle.setCheckable(True)
+        self.log_toggle.toggled.connect(self._toggle_log)
+        layout.addWidget(self.log_toggle)
+
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setFontFamily("monospace")
+        self.log_view.setVisible(False)
+        layout.addWidget(self.log_view, stretch=1)
+
+        layout.addStretch()
         self.refresh()
+
+    def _toggle_log(self, checked):
+        self.log_view.setVisible(checked)
+        self.log_toggle.setText("Hide raw log ▴" if checked else "Show raw log ▾")
+        if checked:
+            self.log_view.setPlainText("\n".join(tail_log()))
 
     def refresh(self):
         last_epoch = read_epoch(STAMP)
@@ -164,7 +232,40 @@ class StatusTab(QWidget):
         else:
             self.news_flag_label.setText("<span style='color:#5aa469'>✓ No pending news block.</span>")
 
-        self.log_view.setPlainText("\n".join(tail_log()))
+        run = parse_last_run()
+        if run is None:
+            self.last_run_label.setText("<b>Last run:</b> no completed run found yet.")
+        else:
+            colors = {
+                "success": "#5aa469",
+                "failed": "#e05d44",
+                "interrupted": "#e0a544",
+                "skipped-throttle": "#888888",
+                "skipped-news": "#e0a544",
+                "skipped-lock": "#888888",
+                "skipped-offline": "#888888",
+                "unknown": "#888888",
+            }
+            labels = {
+                "success": "✓ Succeeded",
+                "failed": "✗ Failed",
+                "interrupted": "⚠ Interrupted (didn't finish cleanly)",
+                "skipped-throttle": "– Skipped (too soon since last update)",
+                "skipped-news": "⚠ Skipped (unacknowledged Arch news)",
+                "skipped-lock": "– Skipped (another run was already in progress)",
+                "skipped-offline": "– Skipped (network was down)",
+                "unknown": "? Unrecognized result",
+            }
+            color = colors.get(run["outcome"], "#888888")
+            label = labels.get(run["outcome"], run["detail"])
+            when = run["when"] or "unknown time"
+            self.last_run_label.setText(
+                f"<b>Last run</b> ({when}): <span style='color:{color}'><b>{label}</b></span><br>"
+                f"<span style='color:#888888'>{run['detail']}</span>"
+            )
+
+        if self.log_view.isVisible():
+            self.log_view.setPlainText("\n".join(tail_log()))
 
 
 class LiveUpdateTab(QWidget):
