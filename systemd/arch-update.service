@@ -1,0 +1,12 @@
+[Unit]
+Description=Arch Linux auto update (pacman) + trigger yay service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/arch-update.sh
+ExecStartPost=/usr/bin/systemctl start arch-update-yay.service
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=2h

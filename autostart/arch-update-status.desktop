@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Arch Update Status
+Comment=Shows the auto-update status and any pending Arch news at login
+Exec=/usr/local/bin/arch-update-status-popup.sh
+NoDisplay=false
+Terminal=false

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Arch Update Status
+Comment=Check Arch Linux auto-update status and pending news
+Exec=/usr/local/bin/arch-update-status-popup.sh
+Icon=system-software-update
+Categories=System;Settings;
+Terminal=false
+StartupNotify=true
