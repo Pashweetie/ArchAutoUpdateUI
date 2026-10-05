@@ -89,15 +89,18 @@ trap on_exit EXIT
   fi
   rm -f "$NEWS_FLAG"
 
-  echo "pacman: syncing + upgrading..."
-  # Stream live (so the app's Live Update tab shows real-time output) while
-  # still truncating the one line that's genuinely unreadable (the full
-  # package-name dump) as it passes through.
-  set +e
-  pacman -Syu --noconfirm 2>&1 | tee "/tmp/arch-update-raw.$$" | \
-    sed -E 's/^(Packages \([0-9]+\)) .*/\1 - full package names omitted from the log for readability (still shown live during the run; parsed list is in PACKAGES: below)/'
-  pacman_status=${PIPESTATUS[0]}
-  set -e
+echo "pacman: syncing + upgrading..."
+# Stream live (so the app's Live Update tab shows real-time output) while
+# still truncating the one line that's genuinely unreadable (the full
+# package-name dump) as it passes through. stdbuf forces pacman to
+# line-buffer instead of block-buffer, since it isn't attached to a real
+# terminal here - without it, output can sit in a buffer for a long time
+# with nothing reaching either the log or the live viewer.
+set +e
+stdbuf -oL -eL pacman -Syu --noconfirm 2>&1 | tee "/tmp/arch-update-raw.$$" | \
+  stdbuf -oL sed -E 's/^(Packages \([0-9]+\)) .*/\1 - full package names omitted from the log for readability (still shown live during the run; parsed list is in PACKAGES: below)/'
+pacman_status=${PIPESTATUS[0]}
+set -e
 
   raw_output="/tmp/arch-update-raw.$$"
   pkg_count=$(grep -oE '^Packages \([0-9]+\)' "$raw_output" | grep -oE '[0-9]+' | head -1)
@@ -129,4 +132,4 @@ trap on_exit EXIT
   fi
   echo "────────────────────────────────────────────────────────────"
   run_finished=1
-} >> "$LOG" 2>&1
+} > >(tee -a "$LOG") 2>&1
